@@ -17,7 +17,9 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/healthz')"]
-      interval: 10s
+      interval: 30s
+      start_interval: 2s
+      start_period: 30s
       timeout: 5s
       retries: 5
 
@@ -43,12 +45,13 @@ services:
           "CMD",
           "python",
           "-c",
-          "from pathlib import Path; import os, sys, time; p = Path('/tmp/memory_runtime_worker_heartbeat'); stale = float(os.getenv('MEMORY_RUNTIME_WORKER_STALE_AFTER_SECONDS', '30.0')); sys.exit(0 if p.exists() and time.time() - p.stat().st_mtime <= stale else 1)",
+          "from pathlib import Path; import os, sys, time; p = Path('/tmp/memory_runtime_worker_heartbeat'); stale = float(os.getenv('MEMORY_RUNTIME_WORKER_STALE_AFTER_SECONDS', '90.0')); sys.exit(0 if p.exists() and time.time() - p.stat().st_mtime <= stale else 1)",
         ]
-      interval: 10s
+      interval: 30s
+      start_interval: 5s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 30s
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -62,9 +65,11 @@ services:
       - memory_runtime_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d memory_runtime"]
-      interval: 5s
+      interval: 30s
+      start_interval: 2s
+      start_period: 30s
       timeout: 5s
-      retries: 10
+      retries: 3
 
   redis:
     image: redis:7-alpine
@@ -72,9 +77,11 @@ services:
       - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 30s
+      start_interval: 2s
+      start_period: 30s
       timeout: 5s
-      retries: 10
+      retries: 3
 
 volumes:
   memory_runtime_pgdata:
