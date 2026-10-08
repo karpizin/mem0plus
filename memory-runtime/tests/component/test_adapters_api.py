@@ -723,3 +723,102 @@ class AdaptersApiContractRegressionTests(AdaptersApiTests):
             sum(1 for item in search_memories if "dedicated memory worker" in item),
             1,
         )
+
+    def test_bunkerai_management_contract_supports_full_memory_lifecycle(self) -> None:
+        bootstrapped = self.client.post(
+            "/v1/adapters/bunkerai/bootstrap",
+            json={
+                "namespace_name": "bunker:user:management-test",
+                "agent_name": "bunker-core",
+                "external_ref": "bunker:user:management-test",
+            },
+        )
+        self.assertEqual(bootstrapped.status_code, 200)
+        namespace_id = bootstrapped.json()["namespace_id"]
+        agent_id = bootstrapped.json()["agent_id"]
+
+        durable = self.client.post(
+            "/v1/adapters/bunkerai/events",
+            json={
+                "namespace_id": namespace_id,
+                "agent_id": agent_id,
+                "session_id": "general",
+                "event_type": "architecture_decision",
+                "space_hint": "agent-core",
+                "messages": [{"role": "user", "content": "The preferred deployment region is local-only."}],
+                "metadata": {"source_message_id": "msg-durable"},
+                "dedupe_key": "management-test:durable",
+            },
+        )
+        local = self.client.post(
+            "/v1/adapters/bunkerai/events",
+            json={
+                "namespace_id": namespace_id,
+                "agent_id": agent_id,
+                "session_id": "private-channel",
+                "event_type": "conversation_turn",
+                "space_hint": "session-space",
+                "messages": [{"role": "user", "content": "Keep this note inside the private channel."}],
+                "metadata": {"source_message_id": "msg-local"},
+                "dedupe_key": "management-test:local",
+            },
+        )
+        self.assertEqual(durable.status_code, 201)
+        self.assertEqual(local.status_code, 201)
+        self.assertGreaterEqual(WorkerRunner.run_pending_jobs(), 2)
+
+        listed = self.client.get(
+            f"/v1/adapters/bunkerai/memories?namespace_id={namespace_id}&agent_id={agent_id}&include_sessions=true"
+        )
+        self.assertEqual(listed.status_code, 200)
+        memories = listed.json()["results"]
+        self.assertTrue(any("local-only" in item["memory"] for item in memories))
+        session_memory = next(item for item in memories if "private channel" in item["memory"])
+        self.assertEqual(session_memory["metadata"]["session_id"], "private-channel")
+        self.assertEqual(session_memory["metadata"]["source_message_id"], "msg-local")
+
+        durable_memory = next(item for item in memories if "local-only" in item["memory"])
+        self.assertEqual(durable_memory["metadata"]["source_message_id"], "msg-durable")
+        corrected = self.client.patch(
+            f"/v1/adapters/bunkerai/memories/{durable_memory['id']}?namespace_id={namespace_id}&agent_id={agent_id}",
+            json={"content": "The preferred deployment region is an offline local node."},
+        )
+        self.assertEqual(corrected.status_code, 200)
+        self.assertIn("offline local node", corrected.json()["memory"])
+
+        deleted = self.client.delete(
+            f"/v1/adapters/bunkerai/memories/{session_memory['id']}?namespace_id={namespace_id}&agent_id={agent_id}"
+        )
+        self.assertEqual(deleted.status_code, 204)
+
+        purged = self.client.delete(
+            f"/v1/adapters/bunkerai/memories?namespace_id={namespace_id}&agent_id={agent_id}"
+        )
+        self.assertEqual(purged.status_code, 204)
+        empty = self.client.get(
+            f"/v1/adapters/bunkerai/memories?namespace_id={namespace_id}&agent_id={agent_id}&include_sessions=true"
+        )
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json()["results"], [])
+
+    def test_bunkerai_delete_cancels_pending_consolidation(self) -> None:
+        created = self.client.post(
+            "/v1/adapters/bunkerai/events",
+            json={
+                "namespace_id": self.namespace_id,
+                "agent_id": self.bunkerai_agent_id,
+                "session_id": "temporary",
+                "event_type": "conversation_turn",
+                "space_hint": "session-space",
+                "messages": [{"role": "user", "content": "Delete this before consolidation."}],
+                "dedupe_key": "delete-before-consolidation",
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        episode_id = created.json()["event"]["episode_id"]
+
+        deleted = self.client.delete(
+            f"/v1/adapters/bunkerai/memories/{episode_id}?namespace_id={self.namespace_id}&agent_id={self.bunkerai_agent_id}"
+        )
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(WorkerRunner.run_pending_jobs(), 0)

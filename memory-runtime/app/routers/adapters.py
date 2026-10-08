@@ -172,6 +172,123 @@ def bunkerai_event(payload: AdapterEventCreate, db: Session = Depends(get_db_ses
     return _ingest("bunkerai", payload, db)
 
 
+@router.post("/bunkerai/bootstrap", response_model=AdapterBootstrapResponse)
+def bunkerai_bootstrap(payload: AdapterBootstrapRequest, db: Session = Depends(get_db_session)) -> AdapterBootstrapResponse:
+    return _bootstrap("bunkerai", payload, db)
+
+
 @router.post("/bunkerai/recall", response_model=AdapterRecallResponse)
 def bunkerai_recall(payload: AdapterRecallRequest, db: Session = Depends(get_db_session)) -> AdapterRecallResponse:
     return _recall("bunkerai", payload, db)
+
+
+@router.post("/bunkerai/search", response_model=AdapterMemorySearchResponse)
+def bunkerai_search(payload: AdapterMemorySearchRequest, db: Session = Depends(get_db_session)) -> AdapterMemorySearchResponse:
+    return _search("bunkerai", payload, db)
+
+
+@router.get("/bunkerai/memories", response_model=AdapterMemorySearchResponse)
+def bunkerai_list_memories(
+    namespace_id: str = Query(...),
+    agent_id: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+    include_sessions: bool = Query(default=False),
+    db: Session = Depends(get_db_session),
+) -> AdapterMemorySearchResponse:
+    service = AdapterService(db)
+    try:
+        return service.list_memories(
+            adapter_name="bunkerai",
+            namespace_id=namespace_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            include_sessions=include_sessions,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/bunkerai/memories/{memory_id}", response_model=AdapterMemoryRead)
+def bunkerai_get_memory(
+    memory_id: str,
+    namespace_id: str = Query(...),
+    agent_id: str | None = Query(default=None),
+    db: Session = Depends(get_db_session),
+) -> AdapterMemoryRead:
+    service = AdapterService(db)
+    try:
+        return service.get_memory(
+            adapter_name="bunkerai",
+            namespace_id=namespace_id,
+            agent_id=agent_id,
+            memory_id=memory_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.patch("/bunkerai/memories/{memory_id}", response_model=AdapterMemoryRead)
+def bunkerai_review_memory(
+    memory_id: str,
+    payload: AdapterMemoryReviewRequest,
+    namespace_id: str = Query(...),
+    agent_id: str | None = Query(default=None),
+    db: Session = Depends(get_db_session),
+) -> AdapterMemoryRead:
+    service = AdapterService(db)
+    try:
+        return service.review_memory(
+            adapter_name="bunkerai",
+            namespace_id=namespace_id,
+            agent_id=agent_id,
+            memory_id=memory_id,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.delete("/bunkerai/memories/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
+def bunkerai_delete_memory(
+    memory_id: str,
+    namespace_id: str = Query(...),
+    agent_id: str | None = Query(default=None),
+    db: Session = Depends(get_db_session),
+) -> None:
+    service = AdapterService(db)
+    try:
+        service.delete_memory(
+            adapter_name="bunkerai",
+            namespace_id=namespace_id,
+            agent_id=agent_id,
+            memory_id=memory_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.delete("/bunkerai/memories", status_code=status.HTTP_204_NO_CONTENT)
+def bunkerai_purge_memories(
+    namespace_id: str = Query(...),
+    agent_id: str | None = Query(default=None),
+    db: Session = Depends(get_db_session),
+) -> None:
+    service = AdapterService(db)
+    try:
+        service.purge_memories(
+            adapter_name="bunkerai",
+            namespace_id=namespace_id,
+            agent_id=agent_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

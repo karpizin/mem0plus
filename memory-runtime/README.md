@@ -130,11 +130,19 @@ Readiness baseline теперь включает:
 - `GET /v1/adapters/openclaw/memories/{memory_id}`
 - `PATCH /v1/adapters/openclaw/memories/{memory_id}`
 - `DELETE /v1/adapters/openclaw/memories/{memory_id}`
+- `POST /v1/adapters/bunkerai/bootstrap`
 - `POST /v1/adapters/bunkerai/events`
 - `POST /v1/adapters/bunkerai/recall`
+- `POST /v1/adapters/bunkerai/search`
+- `GET /v1/adapters/bunkerai/memories`
+- `GET /v1/adapters/bunkerai/memories/{memory_id}`
+- `PATCH /v1/adapters/bunkerai/memories/{memory_id}`
+- `DELETE /v1/adapters/bunkerai/memories/{memory_id}`
+- `DELETE /v1/adapters/bunkerai/memories`
 
 Адаптерные endpoints фиксируют source-system contract для интеграций и работают поверх того же ingestion/recall pipeline.
 Для `OpenClaw` добавлен отдельный runtime-contract: плагин сначала вызывает `bootstrap`, затем использует `events/search/list/get/delete` как transport-поверхность вместо прямого подключения к `mem0`.
+Для BunkerAI действует такой же полный lifecycle contract. Compatibility-provider создаёт отдельный namespace на каждого авторизованного пользователя; `include_sessions=true` добавляет channel-local episodes в управление и экспорт, а collection-level `DELETE` очищает события, эпизоды, consolidated memory, фоновые задания и audit trail пользователя.
 Long-term `search/list` в adapter contract теперь возвращают только durable `memory_units` и не подтягивают `session-space` или raw `episode` noise; session-scoped `episode` candidates доступны только при явном `session_id`, а уже консолидированные эпизоды не дублируются рядом с `memory_units`.
 
 `PATCH /v1/adapters/openclaw/memories/{memory_id}` закрывает минимальный review-surface для `OpenClaw`: durable `memory_units` и session `episodes` можно обновлять, а `mark_incorrect` мягко убирает durable memory из active recall/list/search или удаляет session scratchpad из текущего session-surface.

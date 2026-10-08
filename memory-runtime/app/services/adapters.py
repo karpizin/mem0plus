@@ -4,10 +4,16 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.models.audit_log import AuditLog
+from app.models.episode import Episode
+from app.models.job import Job
+from app.models.memory_event import MemoryEvent
+from app.models.memory_unit import MemoryUnit
 from app.repositories.agents import AgentRepository
 from app.repositories.audit_logs import AuditLogRepository
 from app.repositories.episodes import EpisodeRepository
 from app.repositories.memory_spaces import MemorySpaceRepository
+from app.repositories.memory_events import MemoryEventRepository
 from app.repositories.memory_units import MemoryUnitRepository
 from app.repositories.namespaces import NamespaceRepository
 from app.sensitivity import detect_sensitive_reason, format_sensitive_text, should_mask_sensitive_outputs
@@ -54,6 +60,7 @@ class AdapterService:
         self.audit_logs = AuditLogRepository(session)
         self.episodes = EpisodeRepository(session)
         self.memory_units = MemoryUnitRepository(session)
+        self.events = MemoryEventRepository(session)
         self.ingestion = IngestionService(session)
         self.retrieval = RetrievalService(session)
 
@@ -225,17 +232,19 @@ class AdapterService:
         namespace_id: str,
         agent_id: str | None,
         session_id: str | None,
+        include_sessions: bool = False,
     ) -> AdapterMemorySearchResponse:
         self._validate_adapter_context(
             adapter_name=adapter_name,
             namespace_id=namespace_id,
             agent_id=agent_id,
         )
-        candidates = (
-            self._session_candidates(namespace_id, agent_id, session_id)
-            if session_id
-            else self._long_term_candidates(namespace_id, agent_id)
-        )
+        if session_id:
+            candidates = self._session_candidates(namespace_id, agent_id, session_id)
+        else:
+            candidates = self._long_term_candidates(namespace_id, agent_id)
+            if include_sessions:
+                candidates.extend(self._all_session_candidates(namespace_id, agent_id))
         return AdapterMemorySearchResponse(
             adapter=adapter_name,
             source_system=adapter_name,
@@ -253,6 +262,41 @@ class AdapterService:
                 for candidate in candidates
             ],
         )
+
+    def purge_memories(
+        self,
+        *,
+        adapter_name: str,
+        namespace_id: str,
+        agent_id: str | None,
+    ) -> None:
+        self._validate_adapter_context(
+            adapter_name=adapter_name,
+            namespace_id=namespace_id,
+            agent_id=agent_id,
+        )
+        filters = [MemoryUnit.namespace_id == namespace_id]
+        episode_filters = [Episode.namespace_id == namespace_id]
+        event_filters = [MemoryEvent.namespace_id == namespace_id]
+        audit_filters = [AuditLog.namespace_id == namespace_id]
+        if agent_id is not None:
+            filters.append(MemoryUnit.agent_id == agent_id)
+            episode_filters.append(Episode.agent_id == agent_id)
+            event_filters.append(MemoryEvent.agent_id == agent_id)
+            audit_filters.append(AuditLog.agent_id == agent_id)
+
+        memory_ids = {row[0] for row in self.session.query(MemoryUnit.id).filter(*filters).all()}
+        episode_ids = {row[0] for row in self.session.query(Episode.id).filter(*episode_filters).all()}
+        self._delete_jobs_for_resources(memory_ids=memory_ids, episode_ids=episode_ids)
+        self.session.query(AuditLog).filter(*audit_filters).delete(synchronize_session=False)
+        self.session.query(MemoryUnit).filter(*filters).update(
+            {MemoryUnit.supersedes_memory_id: None}, synchronize_session=False
+        )
+        self.session.query(MemoryUnit).filter(*filters).delete(synchronize_session=False)
+        self.session.query(Episode).filter(*episode_filters).delete(synchronize_session=False)
+        self.session.query(MemoryEvent).filter(*event_filters).delete(synchronize_session=False)
+
+        self.session.commit()
 
     def get_memory(
         self,
@@ -298,6 +342,10 @@ class AdapterService:
         if memory_row is not None and memory_row.namespace_id == namespace_id:
             if agent_id is not None and memory_row.agent_id not in {None, agent_id}:
                 raise LookupError(f"Memory '{memory_id}' not found in namespace")
+            self._delete_jobs_for_resources(memory_ids={memory_row.id}, episode_ids=set())
+            self.session.query(MemoryUnit).filter(
+                MemoryUnit.supersedes_memory_id == memory_row.id
+            ).update({MemoryUnit.supersedes_memory_id: None}, synchronize_session=False)
             self.memory_units.delete(memory_row)
             self.session.commit()
             return
@@ -306,6 +354,21 @@ class AdapterService:
         if episode is not None and episode.namespace_id == namespace_id:
             if agent_id is not None and episode.agent_id not in {None, agent_id}:
                 raise LookupError(f"Memory '{memory_id}' not found in namespace")
+            derived_memories = self.session.query(MemoryUnit).filter(
+                MemoryUnit.created_from_episode_id == episode.id
+            ).all()
+            derived_ids = {memory.id for memory in derived_memories}
+            self._delete_jobs_for_resources(memory_ids=derived_ids, episode_ids={episode.id})
+            if derived_ids:
+                self.session.query(MemoryUnit).filter(MemoryUnit.id.in_(derived_ids)).update(
+                    {MemoryUnit.supersedes_memory_id: None}, synchronize_session=False
+                )
+                self.session.query(MemoryUnit).filter(
+                    MemoryUnit.supersedes_memory_id.in_(derived_ids)
+                ).update({MemoryUnit.supersedes_memory_id: None}, synchronize_session=False)
+                self.session.query(MemoryUnit).filter(MemoryUnit.id.in_(derived_ids)).delete(
+                    synchronize_session=False
+                )
             self.episodes.delete(episode)
             self.session.commit()
             return
@@ -491,6 +554,18 @@ class AdapterService:
         )
         return [self._episode_candidate(episode=episode, space_type=space_type) for episode, space_type in rows]
 
+    def _all_session_candidates(
+        self,
+        namespace_id: str,
+        agent_id: str | None,
+    ) -> list[_AdapterMemoryCandidate]:
+        rows = self.episodes.list_by_namespace(namespace_id=namespace_id, agent_id=agent_id)
+        return [
+            self._episode_candidate(episode=episode, space_type=space_type)
+            for episode, space_type in rows
+            if space_type == "session-space"
+        ]
+
     def _long_term_candidates(
         self,
         namespace_id: str,
@@ -519,6 +594,7 @@ class AdapterService:
                     "sensitive": memory.is_sensitive,
                     "sensitivity_reason": memory.sensitivity_reason,
                     "masked": memory.is_sensitive and should_mask_sensitive_outputs(),
+                    **self._source_metadata_for_episode_id(memory.created_from_episode_id),
                 },
                 is_sensitive=memory.is_sensitive,
                 sensitivity_reason=memory.sensitivity_reason,
@@ -551,8 +627,7 @@ class AdapterService:
         space_type = space.space_type if space is not None else "session-space"
         return self._episode_candidate(episode=episode, space_type=space_type)
 
-    @staticmethod
-    def _memory_unit_candidate(memory, *, space_type: str) -> _AdapterMemoryCandidate:
+    def _memory_unit_candidate(self, memory, *, space_type: str) -> _AdapterMemoryCandidate:
         return _AdapterMemoryCandidate(
             id=memory.id,
             resource_kind="memory_unit",
@@ -570,13 +645,13 @@ class AdapterService:
                 "sensitive": memory.is_sensitive,
                 "sensitivity_reason": memory.sensitivity_reason,
                 "masked": memory.is_sensitive and should_mask_sensitive_outputs(),
+                **self._source_metadata_for_episode_id(memory.created_from_episode_id),
             },
             is_sensitive=memory.is_sensitive,
             sensitivity_reason=memory.sensitivity_reason,
         )
 
-    @staticmethod
-    def _episode_candidate(*, episode, space_type: str) -> _AdapterMemoryCandidate:
+    def _episode_candidate(self, *, episode, space_type: str) -> _AdapterMemoryCandidate:
         sensitivity_reason = detect_sensitive_reason(episode.raw_text)
         is_sensitive = sensitivity_reason is not None
         return _AdapterMemoryCandidate(
@@ -595,10 +670,37 @@ class AdapterService:
                 "sensitive": is_sensitive,
                 "sensitivity_reason": sensitivity_reason,
                 "masked": is_sensitive and should_mask_sensitive_outputs(),
+                **self._source_metadata_for_event_id(episode.start_event_id),
             },
             is_sensitive=is_sensitive,
             sensitivity_reason=sensitivity_reason,
         )
+
+    def _source_metadata_for_episode_id(self, episode_id: str | None) -> dict[str, str]:
+        if not episode_id:
+            return {}
+        episode = self.episodes.get_by_id(episode_id)
+        if episode is None:
+            return {"source_episode_id": episode_id}
+        return {
+            "source_episode_id": episode.id,
+            **self._source_metadata_for_event_id(episode.start_event_id),
+        }
+
+    def _source_metadata_for_event_id(self, event_id: str) -> dict[str, str]:
+        metadata = {"source_event_id": event_id}
+        event = self.events.get_by_id(event_id)
+        event_metadata = (event.payload_json or {}).get("metadata", {}) if event is not None else {}
+        source_message_id = event_metadata.get("source_message_id") if isinstance(event_metadata, dict) else None
+        if source_message_id:
+            metadata["source_message_id"] = str(source_message_id)
+        return metadata
+
+    def _delete_jobs_for_resources(self, *, memory_ids: set[str], episode_ids: set[str]) -> None:
+        for job in self.session.query(Job).all():
+            payload = job.payload_json or {}
+            if payload.get("memory_unit_id") in memory_ids or payload.get("episode_id") in episode_ids:
+                self.session.delete(job)
 
     @staticmethod
     def _display_memory(candidate: _AdapterMemoryCandidate) -> str:
