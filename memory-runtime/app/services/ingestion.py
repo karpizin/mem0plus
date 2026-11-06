@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.logging_utils import log_event
+from app.logging_utils import current_request_id, fingerprint, log_event
 from app.repositories.agents import AgentRepository
 from app.repositories.episodes import EpisodeRepository
 from app.repositories.jobs import JobRepository
@@ -85,7 +85,7 @@ class IngestionService:
             event_origin=event_origin,
             space_hint=payload.space_hint,
             resolved_space_type=space.space_type if space else None,
-            dedupe_key=dedupe_key,
+            dedupe_key_hash=fingerprint(dedupe_key),
             message_count=len(normalized_messages),
             message_roles=[message.role for message in normalized_messages],
         )
@@ -107,7 +107,7 @@ class IngestionService:
                 session_id=payload.session_id,
                 event_id=existing_event.id,
                 episode_id=episode.id,
-                dedupe_key=dedupe_key,
+                dedupe_key_hash=fingerprint(dedupe_key),
             )
             return self._build_event_read(existing_event, episode_id=episode.id)
 
@@ -143,6 +143,9 @@ class IngestionService:
             payload_json={
                 "episode_id": episode.id,
                 "space_type": space.space_type if space else "session-space",
+                # Lets the worker's consolidation outcome be traced back to
+                # the request that delivered the turn.
+                "request_id": current_request_id.get(),
             },
         )
 

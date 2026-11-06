@@ -5,7 +5,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.database import get_session_factory
-from app.logging_utils import log_event
+from app.logging_utils import current_request_id, log_event
 from app.models.episode import Episode
 from app.repositories.jobs import JobRepository
 from app.repositories.memory_units import MemoryUnitRepository
@@ -30,6 +30,7 @@ class WorkerRunner:
             memory_units = MemoryUnitRepository(session)
 
             for job in jobs.list_pending():
+                token = current_request_id.set((job.payload_json or {}).get("request_id"))
                 jobs.mark_running(job)
                 log_event(
                     logger,
@@ -75,9 +76,11 @@ class WorkerRunner:
                         job_id=job.id,
                         job_type=job.job_type,
                         payload=job.payload_json,
-                        error=str(exc),
+                        error_type=type(exc).__name__,
                     )
                     raise
+                finally:
+                    current_request_id.reset(token)
             return processed
         finally:
             session.close()
